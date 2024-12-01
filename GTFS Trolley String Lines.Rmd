@@ -1,0 +1,439 @@
+---
+title: "GTFS Trolley String Lines"
+author: Varun Bhakhri
+date: "2024-08-15"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: "hide"
+    code_download: true
+    output_dir: here("Markdowns Output")
+---
+
+### Project Description:
+
+This markdown outlines the process of creating string line charts to represent scheduled trips for each trolley route, in each direction and for each available Fall/Spring season for which GTFS static data was published by SEPTA. 
+
+The code also exports the string line charts into folders for each season.
+
+The GTFS files can be found at [SEPTA's GitHub Page](https://github.com/septadev/GTFS/tags)
+
+### Code Setup
+
+Install and load packages:
+```{r message=FALSE, warning=TRUE, results = 'hide'}
+
+# List of required packages
+required_packages <- c("tidyverse", "tidytransit", "lubridate", "here", "hms")
+
+# Function to install and load packages if not already installed
+install_and_load <- function(packages) {
+  for (pkg in packages) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      install.packages(pkg)
+    }
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Install and load all required packages
+install_and_load(required_packages)
+
+```
+
+### Instructions:
+
+Create a folder named "GTFS Data" and store required GTFS bus files here. This code will create a folder by the same name if it does not already exist:
+
+```{r}
+gtfs_data_folder <- here("GTFS Data")
+
+if (!dir.exists(gtfs_data_folder)) {
+  dir.create(gtfs_data_folder)
+  message("Folder 'GTFS Data' created.")
+} else {
+  message("Folder 'GTFS Data' already exists.")
+}
+
+```
+
+Select the years and seasons for which string line charts are to be generated:
+
+```{r}
+years <- 2016:2024
+seasons <- c("Fall", "Spring")
+
+season_list <- expand.grid(season = seasons, year = years) %>%
+  arrange(year, season) %>%
+  mutate(season_name = paste(season, year))
+
+```
+
+Select the routes for which string line charts are to be generated:
+```{r}
+routes_list <- c("10", "11", "13", "15", "34", "36")
+```
+
+
+### A test string line chart outlining each step in the process:
+
+Methodology:
+
+1) Load the GTFS Data
+2) Create functions to better process time variables
+3) Filter the Stop Times table by Route and Direction.
+4) Filter the Stop Times table by the most appropriate Service ID that represents Trip IDs covering the entire day and occours the most number of times in a season.
+5)Represent each trip ID as a string line over the course of a day, colour coded by time periods.
+
+The following steps break down each process to create the string line charts:
+
+Load GTFS Data from the "GTFS Data" folder
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+gtfs_data_spring_2024 <- read_gtfs(here("GTFS Data", "google_bus_Spring 2024.zip"))
+```
+### Create functions for processing time:
+Function to convert time strings to seconds:
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'} 
+time_to_seconds <- function(time_string) {
+  if (!is.na(time_string)) {
+    hms <- strsplit(time_string, ":")[[1]]
+    as.numeric(hms[1]) * 3600 + as.numeric(hms[2]) * 60 + as.numeric(hms[3])
+  } else {
+    NA_real_  # Return NA as a numeric value
+  }
+}
+```
+Function to calculate time periods based on the first digit of the column
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+time_periods <- function(numerical) {
+  case_when(
+    between(numerical, 0, 6.99) ~ "00.00 - 07.00 - Early Morning",
+    between(numerical, 7, 8.99) ~ "07.00 - 09.00 - AM Rush",
+    between(numerical, 9, 16.99) ~ "09.00 - 17.00 - Midday",
+    between(numerical, 17, 19.99) ~ "17.00 - 20.00 - PM Rush",
+    between(numerical, 20, 23.99) ~ "20.00 - 24.00 - Night"
+  )
+}
+```
+### Create a test string line chart for one route, one direction and one season:
+
+
+Save individual GTFS tables:
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+routes <- gtfs_data_spring_2024$routes
+trips <- gtfs_data_spring_2024$trips
+stop_times <- gtfs_data_spring_2024$stop_times
+calendar_dates <- gtfs_data_spring_2024$calendar_dates
+stops <- gtfs_data_spring_2024$stops
+```
+Filter Route 10:
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+trips_data <- trips %>%
+  filter(route_id == "10" & !trip_headsign == "40th-Market")   
+```
+Get unique directions for the route, excluding "40th-Market"
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+directions <- trips_data %>%
+    filter(trip_headsign != "40th-Market") %>%
+    pull(trip_headsign) %>%
+    unique()
+```
+Filter trips in one direction by choosing one Trip Headsign
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+trips_direction <- trips_data %>%
+      filter(trip_headsign == "13th-Market")
+```
+Filter Service IDs for weekday trips
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+weekday_service_ids <- calendar_dates %>%
+  mutate(weekday = wday(date, label = TRUE)) %>%  # Add a column for the day of the week
+  filter(!weekday %in% c("Sun", "Sat")) %>%       # Exclude weekends
+  pull(service_id) 
+```
+Find common Service IDs that exists in both trips_data and calendar_dates
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+common_service_ids <- weekday_service_ids[weekday_service_ids %in% trips_data$service_id]
+```
+Filter calendar dates with only the common Service IDs and remove dates where services were excluded (exception_type = 2)
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+filtered_calendar_dates <- calendar_dates %>%
+      filter(service_id %in% common_service_ids)
+```
+Join the filtered calendar dates with trips on the selected route and direction
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+trips_dates <- right_join(trips_direction, filtered_calendar_dates, by = "service_id") %>%
+      filter(!is.na(trip_id))
+```
+Arrange Service IDs by most to least run patterns across the filtered calendar dates
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+trips_per_service_id <- trips_dates %>%
+      group_by(date, service_id) %>%
+      count(date) %>%
+      arrange(desc(n))
+```
+Extract the Service ID with the most patterns
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+best_service_id <- trips_per_service_id[1,] %>%   # Sort by count in descending order
+      pull(service_id)
+```
+Filter all trips that run on the selected Service ID
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+trips_selected <- trips_direction %>%
+    filter(service_id == best_service_id)
+```
+Filter the stop times corresponding to the selected patterns and convert time variables to more usable formats
+```{r message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+trip_stop_times <- stop_times %>%
+    filter(trip_id %in% trips_selected$trip_id) %>%
+    mutate(
+      departure_time = as.character(departure_time),
+      departure_seconds = sapply(departure_time, time_to_seconds),
+      departure_hours = departure_seconds / 3600,
+      time_periods = time_periods(departure_hours),
+      arrival_time = as.POSIXct(arrival_time, format = "%H:%M:%S", tz = "UTC")
+    ) %>%
+    arrange(trip_id, stop_sequence)
+```
+### Plot the String Line Chart for one route and direction
+```{r message=FALSE, warning=FALSE, cache=TRUE, fig.width=12, fig.height=6}
+ggplot(trip_stop_times, aes(x = arrival_time, y = stop_sequence, color = time_periods, group = trip_id)) +
+        geom_line() +
+        labs(
+          title = paste("String Line Chart for Route", "10", "13th-Market", "on Weekdays", "in Spring 2024"),
+          x = "Time",
+          y = "Stop Sequence"
+        ) +
+        scale_x_datetime(date_labels = "%H:%M") +
+        theme_minimal()
+```
+
+### Create a function to create string lines for each trolley route and direction for a single season.
+
+Methodology: Run for loops that cycle through each Route and Direction
+
+```{r}
+create_string_line_chart <- function(gtfs_data_spring_2024, routes_list) {
+  routes <- gtfs_data_spring_2024$routes
+  trips <- gtfs_data_spring_2024$trips
+  stop_times <- gtfs_data_spring_2024$stop_times
+  calendar_dates <- gtfs_data_spring_2024$calendar_dates
+  stops <- gtfs_data_spring_2024$stops
+  
+  for (route in routes_list) {
+    # Filter the routes table to find the correct route_id
+    route_data <- routes %>%
+      filter(route_id == route)
+    
+    if (nrow(route_data) == 0) {
+      message(paste("Route", route, "not found in GTFS data. Skipping..."))
+      next
+    }
+    
+    trips_data <- trips %>%
+      filter(route_id == route_data$route_id)
+    
+    # Get unique directions for the route, excluding "40th-Market"
+    directions <- trips_data %>%
+      filter(trip_headsign != "40th-Market") %>%
+      pull(trip_headsign) %>%
+      unique()
+    
+    for (direction in directions) {
+      trips_direction <- trips_data %>%
+        filter(trip_headsign == direction)
+      
+      weekday_service_ids <- calendar_dates %>%
+        mutate(weekday = wday(date, label = TRUE)) %>%  # Add a column for the day of the week
+        filter(!weekday %in% c("Sun", "Sat")) %>%       # Exclude weekends
+        pull(service_id)                                # Extract the service_id values
+      
+      # Find common service_ids that exists in both trips_data and calendar_dates
+      common_service_ids <- weekday_service_ids[weekday_service_ids %in% trips_direction$service_id]
+      
+      if (length(common_service_ids) == 0) {
+        message(paste("No common service_id found for route", route, "and direction", direction, ". Skipping..."))
+        next
+      }
+      
+      filtered_calendar_dates <- calendar_dates %>%
+        filter(service_id %in% common_service_ids)
+      
+      trips_dates <- right_join(trips_direction, filtered_calendar_dates, by = "service_id") %>%
+        filter(!is.na(trip_id))
+      
+      trips_per_service_id <- trips_dates %>%
+        group_by(date, service_id) %>%
+        count(date) %>%
+        arrange(desc(n))
+      
+      best_service_id <- trips_per_service_id[1, ] %>%
+        pull(service_id)
+      
+      trips_on_date <- trips_direction %>%
+        filter(service_id == best_service_id)
+      
+      trip_stop_times <- stop_times %>%
+        filter(trip_id %in% trips_on_date$trip_id) %>%
+        mutate(
+          departure_time = as.character(departure_time),
+          departure_seconds = sapply(departure_time, time_to_seconds),
+          departure_hours = departure_seconds / 3600,
+          time_periods = time_periods(departure_hours),
+          arrival_time = as.POSIXct(arrival_time, format = "%H:%M:%S", tz = "UTC")
+        ) %>%
+        arrange(trip_id, stop_sequence)
+      
+      trip_stop_times_with_names <- trip_stop_times %>%
+        left_join(stops, by = "stop_id") %>%
+        mutate(stop_name_number = paste(stop_sequence, stop_name, sep = "_"))
+      
+      string_chart <- ggplot(trip_stop_times_with_names, aes(x = arrival_time, y = stop_sequence, color = time_periods, group = trip_id)) +
+        geom_line() +
+        labs(
+          title = paste("String Line Chart for Route", route, " Trips to", direction, "on Weekdays", "in Spring 2024"),
+          x = "Time",
+          y = "Stop Sequence"
+        ) +
+        scale_x_datetime(date_labels = "%H:%M") +
+        theme_minimal()
+     output_path <- here("String Lines Exports", paste0("gtfs_route_", route, "_", gsub(" ", "_", direction), "_Weekday_string_line_chart.jpg"))
+      ggsave(output_path, plot = string_chart, width = 4000, height = 1750, units = "px")
+      print(string_chart)
+    }
+  }
+}
+```
+
+
+### Run the function to create string lines for routes 10, 11, 13, 15, 34, 36
+
+```{r message=FALSE, warning=FALSE, cache=TRUE, fig.width=10, fig.height=4.5}
+create_string_line_chart(gtfs_data_spring_2024, c("10", "11", "13", "15", "34", "36"))
+```
+
+### Export string lines for all available seasons:
+
+Methodology: Run for loops that cycle through each Route, Direction and Season
+
+
+Create a function to create string lines for all available seasons:
+```{r}
+create_string_line_chart_seasons <- function(gtfs_data, routes_list, season) {
+  routes <- gtfs_data$routes
+  trips <- gtfs_data$trips
+  stop_times <- gtfs_data$stop_times
+  calendar_dates <- gtfs_data$calendar_dates
+  stops <- gtfs_data$stops
+  
+  for (route in routes_list) {
+    # Filter the routes table to find the correct route_id
+    route_data <- routes %>%
+      filter(route_id == route)
+    
+    if (nrow(route_data) == 0) {
+      message(paste("Route", route, "not found in GTFS data. Skipping..."))
+      next
+    }
+    
+    trips_data <- trips %>%
+      filter(route_id == route_data$route_id)
+    
+    # Get unique directions for the route, excluding "40th-Market"
+    directions <- trips_data %>%
+      filter(trip_headsign != "40th-Market") %>%
+      pull(trip_headsign) %>%
+      unique()
+    
+    for (direction in directions) {
+      trips_direction <- trips_data %>%
+        filter(trip_headsign == direction)
+      
+      weekday_service_ids <- calendar_dates %>%
+        mutate(weekday = wday(date, label = TRUE)) %>%  # Add a column for the day of the week
+        filter(!weekday %in% c("Sun", "Sat")) %>%       # Exclude weekends
+        pull(service_id)                                # Extract the service_id values
+      
+      # Find common service_ids that exist in both trips_data and calendar_dates
+      common_service_ids <- weekday_service_ids[weekday_service_ids %in% trips_direction$service_id]
+      
+      if (length(common_service_ids) == 0) {
+        message(paste("No common service_id found for route", route, "and direction", direction, ". Skipping..."))
+        next
+      }
+      
+      filtered_calendar_dates <- calendar_dates %>%
+        filter(service_id %in% common_service_ids)
+      
+      trips_dates <- right_join(trips_direction, filtered_calendar_dates, by = "service_id") %>%
+        filter(!is.na(trip_id))
+      
+      trips_per_service_id <- trips_dates %>%
+        group_by(date, service_id) %>%
+        count(date) %>%
+        arrange(desc(n))
+      
+      best_service_id <- trips_per_service_id[1, ] %>%
+        pull(service_id)
+      
+      trips_on_date <- trips_direction %>%
+        filter(service_id == best_service_id)
+      
+      trip_stop_times <- stop_times %>%
+        filter(trip_id %in% trips_on_date$trip_id) %>%
+        mutate(
+          departure_time = as.character(departure_time),
+          departure_seconds = sapply(departure_time, time_to_seconds),
+          departure_hours = departure_seconds / 3600,
+          time_periods = time_periods(departure_hours),
+          arrival_time = as.POSIXct(arrival_time, format = "%H:%M:%S", tz = "UTC")
+        ) %>%
+        arrange(trip_id, stop_sequence)
+      
+      trip_stop_times_with_names <- trip_stop_times %>%
+        left_join(stops, by = "stop_id") %>%
+        mutate(stop_name_number = paste(stop_sequence, stop_name, sep = "_"))
+      
+      string_chart <- ggplot(trip_stop_times_with_names, aes(x = arrival_time, y = stop_sequence, color = time_periods, group = trip_id)) +
+        geom_line() +
+        labs(
+          title = paste("String Line Chart for Route", route, "Trips to", direction, "on Weekdays", season),
+          x = "Time",
+          y = "Stop Sequence"
+        ) +
+        scale_x_datetime(date_labels = "%H:%M") +
+        theme_minimal()
+      
+      # Create the season-specific folder inside "String Lines Exports"
+      season_folder <- here("String Lines Exports", season)
+      if (!dir.exists(season_folder)) {
+        dir.create(season_folder, recursive = TRUE)
+      }
+      
+      output_path <- file.path(season_folder, paste0("gtfs_route_", route, "_", gsub(" ", "_", direction), "_Weekday_string_line_chart.jpg"))
+      ggsave(output_path, plot = string_chart, width = 4000, height = 1750, units = "px")
+      print(string_chart)
+    }
+  }
+}
+
+```
+
+Loop over each season and create string line charts for each route, and save in their respective folders:
+
+```{r}
+
+for (season in season_list$season_name) {
+  gtfs_file <- here("GTFS Data", paste0("google_bus_", season, ".zip"))
+  
+  if (!file.exists(gtfs_file)) {
+    message(paste("GTFS file for", season, "not found. Skipping..."))
+    next
+  }
+  
+  gtfs_data <- read_gtfs(gtfs_file)
+  
+  create_string_line_chart_seasons(gtfs_data, routes_list, season)
+}
+```
+
